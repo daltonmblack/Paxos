@@ -1,8 +1,14 @@
 package actors;
 
-public class Learner {
+import java.net.MulticastSocket;
+import java.util.UUID;
 
-	public Learner() {
-		
+public class Learner {
+	private UUID id;
+	private MulticastSocket ms;
+	
+	public Learner(UUID id, MulticastSocket ms) {
+		this.id = id;
+		this.ms = ms;
 	}
 }

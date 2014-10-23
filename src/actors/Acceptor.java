@@ -1,8 +1,20 @@
 package actors;
 
-public class Acceptor {
+import general.Ballot;
 
-		public Acceptor() {
-			
-		}
+import java.net.MulticastSocket;
+import java.util.UUID;
+
+public class Acceptor {
+	private UUID id;
+	private MulticastSocket ms;
+	
+	public Acceptor(UUID id, MulticastSocket ms) {
+		this.id = id;
+		this.ms = ms;
+	}
+	
+	public void processPrepare(UUID idSender, Ballot ballot) {
+		
+	}
 }
