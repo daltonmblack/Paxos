@@ -10,13 +10,19 @@ import java.net.MulticastSocket;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.UUID;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 // TODO: need to ignore messages from oneself
 // TODO: add length field to make string payload possible
 // TODO: should more PaxosNode_s be able to come online after initial minimum?
+// TODO: separate thread for heart beat?
 
 /*
  * Notes:
@@ -26,7 +32,7 @@ import java.util.UUID;
 
 /* Message structures
  * 
- * Discovery:
+ * Heartbeat:
  *  ----------- ------
  * | Sender ID | Type |
  *  ----------- ------
@@ -43,7 +49,7 @@ import java.util.UUID;
  *  
  * Sender ID: ID of PaxosNode sending the message (16 bytes)
  * Type: type of the message being sent (4 bytes)
- *   - 0: discovery message
+ *   - 0: heartbeat message
  *   - 1: client request
  *   - 2: proposal
  * Value: value of the proposal (4 bytes)
@@ -58,7 +64,15 @@ public class PaxosNode {
 	private MulticastSocket ms;
 	private int paxosPort;
 	
-	// Identity of PaxosNode
+	// Locks.
+	private Lock mtxSocket;
+	private Lock mtxAliveNodes;
+	
+	// Timers.
+	private Timer timerHeartbeat; // Schedules heartbeats to be sent to other PaxosNode_s.
+	private Timer timerKeepalive; // Schedules checks to look for PaxosNodes_s that have gone offline.
+	
+	// Identity of PaxosNode.
 	private UUID id;
 	private byte[] idBytes;
 	
@@ -73,7 +87,13 @@ public class PaxosNode {
 	private Acceptor acceptor;
 	private Learner learner;	
 	
-	private Set<UUID> aliveNodes;
+	// Set of currently alive PaxosNode_s.
+	private Map<UUID, Long> aliveNodes;
+	
+	// Used to determine leader duties and switches.
+	private boolean paxosStarted; // TODO: remove this later?
+	private boolean isLeader;
+	private UUID idLeader;
 	
 	private enum MsgPiece {
 		TYPE (16),
@@ -88,10 +108,73 @@ public class PaxosNode {
 		}
 	}
 	
+	private class Heartbeat extends TimerTask {
+		
+		public void run() {
+			byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
+			for (int i = 0; i < 16; i++) buf[i] = idBytes[i];
+			for (int i = 16; i < 20; i++) buf[i] = 0;
+			
+			DatagramPacket dgramHeartbeat = new DatagramPacket(buf, buf.length, paxosGroup, paxosPort);
+			
+			try {
+				mtxSocket.lock();
+				ms.send(dgramHeartbeat);
+			} catch (IOException e) {
+				mtxSocket.unlock();
+				System.err.println("Error: failed to send heart beat.");
+			}
+			
+			mtxSocket.unlock();
+		}
+	}
+	
+	private class Keepalive extends TimerTask {
+		
+		public void run() {
+			mtxAliveNodes.lock();
+			
+			boolean replaceLeader = false;
+			long curTime = System.currentTimeMillis();
+			Iterator<UUID> iter = aliveNodes.keySet().iterator();
+			while (iter.hasNext()) {
+				UUID idCur = iter.next();
+				long timeElapsed = curTime - aliveNodes.get(idCur);
+				if (timeElapsed > PaxosConstants.LEADER_TIMEOUT) {
+					iter.remove();
+					if (idEquals(idCur, idLeader)) replaceLeader = true;
+				}
+			}
+			
+			if (replaceLeader) {
+				UUID idLargest = null;
+				for (UUID idCur : aliveNodes.keySet()) {
+					if (idGreater(idCur, idLargest)) idLargest = idCur;
+				}
+				
+				if (idEquals(id, idLargest)) {
+					isLeader = true;
+					System.out.println("I am the new leader!");
+				}
+				
+				idLeader = idLargest;
+			}
+			
+			mtxAliveNodes.unlock();
+		}
+	}
+	
 	public PaxosNode() {
 		paxosGroup = null;
 		ms = null;
 		paxosPort = PaxosConstants.PAXOS_PORT;
+		
+		mtxSocket = new ReentrantLock();
+		mtxAliveNodes = new ReentrantLock();
+		
+		timerHeartbeat = new Timer();
+		timerKeepalive = new Timer();
+		
 		id = UUID.randomUUID();
 		idBytes = uuidToBytes(id);
 		
@@ -103,7 +186,11 @@ public class PaxosNode {
 		acceptor = null;
 		learner = null;
 		
-		aliveNodes = new HashSet<UUID>();
+		aliveNodes = new HashMap<UUID, Long>();
+		
+		paxosStarted = false;
+		isLeader = false;
+		idLeader = null;
 	}
 	
 	public boolean init() {
@@ -158,14 +245,12 @@ public class PaxosNode {
 	public void run() {
 		System.out.println("Paxos node started on port: " + paxosPort);
 		
-		// If the node fails to send discovery message, 
-		if (!sendDiscoveryMessage()) {
-			clean();
-			return;
-		}
+		timerHeartbeat.schedule(new Heartbeat(), 0, PaxosConstants.HEARTBEAT);
+		timerKeepalive.schedule(new Keepalive(), 0, PaxosConstants.LEADER_TIMEOUT);
 		
+		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
+
 		while (!terminateNode) {
-			byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 			DatagramPacket dgram = new DatagramPacket(buf, buf.length);
 			
 			try {
@@ -180,8 +265,7 @@ public class PaxosNode {
 			
 			switch (type) {
 				case 0:
-					aliveNodes.add(idSender);
-					System.out.println("New PaxosNode found: " + idSender);
+					processHeartbeat(idSender);
 					break;
 				case 1:
 					proposer.processClientRequest(idSender, val);
@@ -196,6 +280,29 @@ public class PaxosNode {
 		}
 		
 		clean();
+	}
+	
+	private void processHeartbeat(UUID idSender) {
+		mtxAliveNodes.lock();
+		long curTime = System.currentTimeMillis();
+		
+		if (!aliveNodes.containsKey(idSender)) System.out.println("New PaxosNode found: " + idSender);
+		
+		aliveNodes.put(idSender, curTime);
+			
+		if (!paxosStarted && aliveNodes.size() >= PaxosConstants.MAJORITY) {
+			paxosStarted = true;
+			
+			UUID idLargest = idLargestAlive();
+			if (idEquals(id, idLargest)) {
+				isLeader = true;
+				System.out.println("I am the new leader!");
+			}
+			
+			idLeader = idLargest;
+		}
+		
+		mtxAliveNodes.unlock();
 	}
 	
 	private int getPiece(byte[] buf, MsgPiece msgPiece) {
@@ -220,30 +327,70 @@ public class PaxosNode {
 		return new Ballot(instance, proposal, value);
 	}
 	
-	private boolean sendDiscoveryMessage() {
-		byte[] bufInitial = new byte[PaxosConstants.BUFFER_LENGTH];
-		for (int i = 0; i < 16; i++) {
-			bufInitial[i] = idBytes[i];
-		}
-		
-		DatagramPacket dgramInitial = new DatagramPacket(bufInitial, bufInitial.length, paxosGroup, paxosPort);
-		try {
-			ms.send(dgramInitial);
-		} catch (IOException e1) {
-			error("run", "failed to send initial datagram");
-			return false;
-		}
-		
-		return true;
-	}
-	
 	private byte[] uuidToBytes(UUID uuid) {
 		long uuidms = uuid.getMostSignificantBits();
 		long uuidls = uuid.getLeastSignificantBits();
 		return ByteBuffer.allocate(16).putLong(uuidms).putLong(uuidls).array();
 	}
 	
+	private boolean send(DatagramPacket dgram) {
+		try {
+			mtxSocket.lock();
+			ms.send(dgram);
+		} catch (IOException e) {
+			mtxSocket.unlock();
+			error("run", "failed to send message");
+			return false;
+		}
+		
+		mtxSocket.unlock();
+		
+		return true;
+	}
+
+	private UUID idLargestAlive() {
+		mtxAliveNodes.lock();
+		
+		UUID idLargest = null;
+		for (UUID id : aliveNodes.keySet()) {
+			if (idGreater(id, idLargest)) idLargest = id;
+		}
+		
+		mtxAliveNodes.unlock();
+		
+		return idLargest;
+	}
+	
+	private boolean idGreater(UUID a, UUID b) {
+		if (a == null) return false;
+		if (b == null) return true;
+		
+		long ams = a.getMostSignificantBits();
+		long als = a.getLeastSignificantBits();
+		long bms = b.getMostSignificantBits();
+		long bls = b.getLeastSignificantBits();
+		
+		if (ams < bms) return false;
+		else if (ams > bms) return true;
+		else return als > bls;
+	}
+	
+	private boolean idEquals(UUID a, UUID b) {
+		if (a == null && b == null) return true;
+		if (a == null || b == null) return false;
+		
+		long ams = a.getMostSignificantBits();
+		long als = a.getLeastSignificantBits();
+		long bms = b.getMostSignificantBits();
+		long bls = b.getLeastSignificantBits();
+		
+		return ams == bms && als == bls;
+	}
+	
 	private void clean() {
+		timerHeartbeat.cancel();
+		timerKeepalive.cancel();
+		
 		try {
 			ms.leaveGroup(paxosGroup);
 		} catch (IOException e) {
