@@ -2,6 +2,7 @@ package actors;
 
 import general.Ballot;
 import general.PaxosConstants;
+import general.PaxosUtil;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -11,18 +12,19 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.UUID;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-// TODO: need to ignore messages from oneself
 // TODO: add length field to make string payload possible
 // TODO: should more PaxosNode_s be able to come online after initial minimum?
-// TODO: separate thread for heart beat?
+// TODO: a learner will be able to play catch up by looking at instance numbers.
 
 /*
  * Notes:
@@ -37,25 +39,28 @@ import java.util.concurrent.locks.ReentrantLock;
  * | Sender ID | Type |
  *  ----------- ------
  * 
- * Client request:
+ * Client Request/Confirmation:
  *  ----------- ------ -------
- * | Sender ID | Type | Value |
+ * | Client ID | Type | Value |
  *  ----------- ------ -------
  * 
- * Proposal:
+ * Propose/Accept/Learn:
  *  ----------- ------ ------- ---------- ----------
  * | Sender ID | Type | Value | Instance | Proposal |
  *  ----------- ------ ------- ---------- ----------
  *  
  * Sender ID: ID of PaxosNode sending the message (16 bytes)
+ * Client ID: ID of the client sending the request or receiving the confirmation (16 bytes)
  * Type: type of the message being sent (4 bytes)
  *   - 0: heartbeat message
  *   - 1: client request
- *   - 2: proposal
+ *   - 2: propose
+ *   - 3: accept
+ *   - 4: learn
+ *   - 5: client response
  * Value: value of the proposal (4 bytes)
  * Instance: instance number (4 bytes)
  * Proposal: proposal number (4 bytes)
- *  
  */
 
 public class PaxosNode {
@@ -82,13 +87,18 @@ public class PaxosNode {
 	// Indicates when the Node is shutting down (by error or by user command).
 	private boolean terminateNode;
 	
-	// The actors running inside the Node.
-	private Proposer proposer;
-	private Acceptor acceptor;
-	private Learner learner;	
-	
 	// Set of currently alive PaxosNode_s.
 	private Map<UUID, Long> aliveNodes;
+	
+	// Client request mappings.
+	private Map<Ballot, UUID> requests;
+	private Map<Ballot, Set<UUID>> requestAccepts;
+	
+	// Keeps track of accepted ballots.
+	private Map<Integer, Ballot> acceptedBallots;
+	
+	// Maps instance number to learned value.
+	private Map<Integer, Integer> learnedValues;
 	
 	// Used to determine leader duties and switches.
 	private boolean paxosStarted; // TODO: remove this later?
@@ -96,10 +106,10 @@ public class PaxosNode {
 	private UUID idLeader;
 	
 	private enum MsgPiece {
-		TYPE (16),
-		VALUE (20),
+		TYPE     (16),
+		VALUE    (20),
 		INSTANCE (24),
-		PROPOSAL(28);
+		PROPOSAL (28);
 		
 		int offset;
 		
@@ -142,17 +152,17 @@ public class PaxosNode {
 				long timeElapsed = curTime - aliveNodes.get(idCur);
 				if (timeElapsed > PaxosConstants.LEADER_TIMEOUT) {
 					iter.remove();
-					if (idEquals(idCur, idLeader)) replaceLeader = true;
+					if (PaxosUtil.idEquals(idCur, idLeader)) replaceLeader = true;
 				}
 			}
 			
 			if (replaceLeader) {
 				UUID idLargest = null;
 				for (UUID idCur : aliveNodes.keySet()) {
-					if (idGreater(idCur, idLargest)) idLargest = idCur;
+					if (PaxosUtil.idGreaterThan(idCur, idLargest)) idLargest = idCur;
 				}
 				
-				if (idEquals(id, idLargest)) {
+				if (PaxosUtil.idEquals(id, idLargest)) {
 					isLeader = true;
 					System.out.println("I am the new leader!");
 				}
@@ -176,17 +186,20 @@ public class PaxosNode {
 		timerKeepalive = new Timer();
 		
 		id = UUID.randomUUID();
-		idBytes = uuidToBytes(id);
+		idBytes = PaxosUtil.uuidToBytes(id);
 		
 		mainThread = Thread.currentThread();
 		
 		terminateNode = false;
-				
-		proposer = null;
-		acceptor = null;
-		learner = null;
 		
 		aliveNodes = new HashMap<UUID, Long>();
+		
+		requests = new HashMap<Ballot, UUID>();
+		requestAccepts = new HashMap<Ballot, Set<UUID>>();
+		
+		acceptedBallots = new HashMap<Integer, Ballot>();
+		
+		learnedValues = new HashMap<Integer, Integer>();
 		
 		paxosStarted = false;
 		isLeader = false;
@@ -216,7 +229,7 @@ public class PaxosNode {
 		}
 		
 		try {
-			ms.setSoTimeout(PaxosConstants.HEARTBEAT);
+			ms.setSoTimeout(PaxosConstants.HEARTBEAT_INTERVAL);
 		} catch (SocketException e1) {
 			error("init", "failed to set timeout for multicast socket");
 			return false;
@@ -235,17 +248,13 @@ public class PaxosNode {
 			}
 		});
 		
-		proposer = new Proposer(id, ms);
-		acceptor = new Acceptor(id, ms);
-		learner = new Learner(id, ms);
-		
 		return true;
 	}
 	
 	public void run() {
 		System.out.println("Paxos node started on port: " + paxosPort);
 		
-		timerHeartbeat.schedule(new Heartbeat(), 0, PaxosConstants.HEARTBEAT);
+		timerHeartbeat.schedule(new Heartbeat(), 0, PaxosConstants.HEARTBEAT_INTERVAL);
 		timerKeepalive.schedule(new Keepalive(), 0, PaxosConstants.LEADER_TIMEOUT);
 		
 		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
@@ -262,17 +271,26 @@ public class PaxosNode {
 			UUID idSender = getID(buf);
 			int type = getPiece(buf, MsgPiece.TYPE);
 			int val = getPiece(buf, MsgPiece.VALUE);
+			Ballot ballot;
 			
 			switch (type) {
-				case 0:
+				case PaxosConstants.HEARTBEAT:
 					processHeartbeat(idSender);
 					break;
-				case 1:
-					proposer.processClientRequest(idSender, val);
+				case PaxosConstants.REQUEST:
+					if (isLeader) processRequest(idSender, val);
 					break;
-				case 2:
-					Ballot ballot = getBallot(buf);
-					acceptor.processPrepare(idSender, ballot);
+				case PaxosConstants.PROPOSE:
+					ballot = getBallot(buf);
+					processPropose(ballot);
+					break;
+				case PaxosConstants.ACCEPT:
+					ballot = getBallot(buf);
+					if (isLeader) processAccept(idSender, ballot);
+					break;
+				case PaxosConstants.LEARN:
+					ballot = getBallot(buf);
+					processLearn(ballot);
 					break;
 			}
 			
@@ -280,6 +298,10 @@ public class PaxosNode {
 		}
 		
 		clean();
+		
+		for (Integer i : learnedValues.keySet()) {
+			System.out.println("Instance: " + i + ", value: " + learnedValues.get(i));
+		}
 	}
 	
 	private void processHeartbeat(UUID idSender) {
@@ -294,7 +316,7 @@ public class PaxosNode {
 			paxosStarted = true;
 			
 			UUID idLargest = idLargestAlive();
-			if (idEquals(id, idLargest)) {
+			if (PaxosUtil.idEquals(id, idLargest)) {
 				isLeader = true;
 				System.out.println("I am the new leader!");
 			}
@@ -303,6 +325,54 @@ public class PaxosNode {
 		}
 		
 		mtxAliveNodes.unlock();
+	}
+	
+	private void processRequest(UUID idSender, int value) {
+		Ballot ballot = new Ballot(requestAccepts.size() + 1, 1, value);
+		requests.put(ballot, idSender);
+		requestAccepts.put(ballot, new HashSet<UUID>());
+		if (!sendBallot(ballot, PaxosConstants.PROPOSE)) {
+			error("processRequest", "failed to send client: " + idSender + "'s request for value: " + value);
+		}
+	}
+	
+	private void processPropose(Ballot ballot) {
+		// TODO: make this more robust for edge cases.
+		acceptedBallots.put(ballot.instance, ballot);
+		if (!sendBallot(ballot, PaxosConstants.ACCEPT)) {
+			error("processPropose", "failed to send proposer leader accept message for instance: " + ballot.instance);
+		}
+	}
+	
+	private void processAccept(UUID idSender, Ballot ballot) {
+		Set<UUID> uuids = requestAccepts.get(ballot);
+		uuids.add(idSender);
+		if (uuids.size() >= PaxosConstants.MAJORITY) {
+			if (!sendBallot(ballot, PaxosConstants.LEARN)) error("processAccept", "failed to send learn message");
+		}
+	}
+	
+	private void processLearn(Ballot ballot) {
+		learnedValues.put(ballot.instance, ballot.value);
+		if (isLeader) {
+			UUID idClient = requests.get(ballot);
+			//requests.remove(ballot); // TODO: Cannot do this because lists need to keep growing.
+			//requestAccepts.remove(ballot); // TODO: see above ^
+			
+			byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
+			
+			byte[] idBytes = PaxosUtil.uuidToBytes(idClient);
+			byte[] typeBytes = ByteBuffer.allocate(4).putInt(5).array();
+			byte[] valueBytes = ByteBuffer.allocate(4).putInt(ballot.value).array();
+			
+			for (int i = 0; i < 16; i++) buf[i] = idBytes[i];
+			for (int i = 0; i < 4; i++) {
+				buf[i+16] = typeBytes[i];
+				buf[i+20] = valueBytes[i];
+			}
+			
+			if (!send(buf)) error("processLearn", "failed to send confirmation to client");
+		}
 	}
 	
 	private int getPiece(byte[] buf, MsgPiece msgPiece) {
@@ -327,19 +397,36 @@ public class PaxosNode {
 		return new Ballot(instance, proposal, value);
 	}
 	
-	private byte[] uuidToBytes(UUID uuid) {
-		long uuidms = uuid.getMostSignificantBits();
-		long uuidls = uuid.getLeastSignificantBits();
-		return ByteBuffer.allocate(16).putLong(uuidms).putLong(uuidls).array();
+	private boolean sendBallot(Ballot ballot, int type) {
+		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
+		byte[] typeBytes = ByteBuffer.allocate(4).putInt(type).array();
+		byte[] instanceBytes = ByteBuffer.allocate(4).putInt(ballot.instance).array();
+		byte[] proposalBytes = ByteBuffer.allocate(4).putInt(ballot.proposal).array();
+		byte[] valueBytes = ByteBuffer.allocate(4).putInt(ballot.value).array();
+		
+		for (int i = 0; i < 16; i++) {
+			buf[i] = idBytes[i];
+		}
+		
+		for (int i = 0; i < 4; i++) {
+			buf[i+16] = typeBytes[i];
+			buf[i+20] = valueBytes[i];
+			buf[i+24] = instanceBytes[i];
+			buf[i+28] = proposalBytes[i];
+		}
+		
+		return send(buf);
 	}
 	
-	private boolean send(DatagramPacket dgram) {
+	private boolean send(byte[] buf) {
+		DatagramPacket dgram = new DatagramPacket(buf, buf.length, paxosGroup, paxosPort);
+		
+		mtxSocket.lock();
 		try {
-			mtxSocket.lock();
 			ms.send(dgram);
 		} catch (IOException e) {
 			mtxSocket.unlock();
-			error("run", "failed to send message");
+			error("send", "failed to send message");
 			return false;
 		}
 		
@@ -353,38 +440,12 @@ public class PaxosNode {
 		
 		UUID idLargest = null;
 		for (UUID id : aliveNodes.keySet()) {
-			if (idGreater(id, idLargest)) idLargest = id;
+			if (PaxosUtil.idGreaterThan(id, idLargest)) idLargest = id;
 		}
 		
 		mtxAliveNodes.unlock();
 		
 		return idLargest;
-	}
-	
-	private boolean idGreater(UUID a, UUID b) {
-		if (a == null) return false;
-		if (b == null) return true;
-		
-		long ams = a.getMostSignificantBits();
-		long als = a.getLeastSignificantBits();
-		long bms = b.getMostSignificantBits();
-		long bls = b.getLeastSignificantBits();
-		
-		if (ams < bms) return false;
-		else if (ams > bms) return true;
-		else return als > bls;
-	}
-	
-	private boolean idEquals(UUID a, UUID b) {
-		if (a == null && b == null) return true;
-		if (a == null || b == null) return false;
-		
-		long ams = a.getMostSignificantBits();
-		long als = a.getLeastSignificantBits();
-		long bms = b.getMostSignificantBits();
-		long bls = b.getLeastSignificantBits();
-		
-		return ams == bms && als == bls;
 	}
 	
 	private void clean() {

@@ -9,6 +9,7 @@ import java.net.MulticastSocket;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Scanner;
+import java.util.UUID;
 
 // TODO: Add automatic mode later where client will continually propose values until terminated by the user.
 // TODO: Allow user to propose strings or other data types.
@@ -17,6 +18,7 @@ public class PaxosClient {
 	public static void main(String[] args) {
 		InetAddress paxosGroup = null;
 		MulticastSocket ms = null;
+		UUID id = UUID.randomUUID();
 		
 		try {
 			paxosGroup = InetAddress.getByName(PaxosConstants.PAX0S_GROUP_ADDRESS);
@@ -39,7 +41,15 @@ public class PaxosClient {
 			System.exit(-1);
 		}
 		
-		byte[] idBytes = ByteBuffer.allocate(4).putInt(1234).array();
+		// TODO: fix ID of client and type of message sent
+		byte[] bms = ByteBuffer.allocate(8).putLong(id.getMostSignificantBits()).array();
+		byte[] bls = ByteBuffer.allocate(8).putLong(id.getLeastSignificantBits()).array();
+		
+		byte[] idBytes = new byte[16];
+		for (int i = 0; i < 8; i++) {
+			idBytes[i] = bms[i];
+			idBytes[i+8] = bls[i];
+		}
 		
 		System.out.println("Successfully started PaxosClient. Begin proposing values below");
 		
@@ -58,27 +68,39 @@ public class PaxosClient {
 			byte[] buf = buildPayload(val, idBytes);
 			DatagramPacket dgram = new DatagramPacket(buf, buf.length, paxosGroup, PaxosConstants.PAXOS_PORT);
 			
+			//boolean requestFinished = false;
+			
 			try {
 				ms.send(dgram);
 			} catch (IOException e) {
 				error("main", "failed to send value: " + val);
+				//requestFinished = true;
 			}
+			
+//			while (!requestFinished) {
+//				dgram = new DatagramPacket(buf, buf.length);
+//				// Wait for packet directed to us.
+//			}
 			
 			System.out.print("Value: ");
 		}
+		
+		s.close();
 	}
 	
 	private static byte[] buildPayload(int val, byte[] idBytes) {
 		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 		
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 16; i++) {
 			buf[i] = idBytes[i];
 		}
 		
+		byte[] typeBytes = ByteBuffer.allocate(4).putInt(PaxosConstants.REQUEST).array();
 		byte[] valBytes = ByteBuffer.allocate(4).putInt(val).array();
 		
 		for (int i = 0; i < 4; i++) {
-			buf[4 + i] = valBytes[i];
+			buf[i+16] = typeBytes[i];
+			buf[i+20] = valBytes[i];
 		}
 		
 		return buf;
