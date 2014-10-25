@@ -15,6 +15,6 @@ public class Acceptor {
 	}
 	
 	public void processPrepare(UUID idSender, Ballot ballot) {
-		
+		System.out.println("Received proposed value: " + ballot.value);
 	}
 }
