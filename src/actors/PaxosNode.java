@@ -105,19 +105,6 @@ public class PaxosNode {
 	private boolean isLeader;
 	private UUID idLeader;
 	
-	private enum MsgPiece {
-		TYPE     (16),
-		VALUE    (20),
-		INSTANCE (24),
-		PROPOSAL (28);
-		
-		int offset;
-		
-		MsgPiece(int offset) {
-			this.offset = offset;
-		}
-	}
-	
 	private class Heartbeat extends TimerTask {
 		
 		public void run() {
@@ -268,9 +255,9 @@ public class PaxosNode {
 				continue;
 			}
 			
-			UUID idSender = getID(buf);
-			int type = getPiece(buf, MsgPiece.TYPE);
-			int val = getPiece(buf, MsgPiece.VALUE);
+			UUID idSender = PaxosUtil.getID(buf);
+			int type = PaxosUtil.getType(buf);
+			int val = PaxosUtil.getValue(buf);
 			Ballot ballot;
 			
 			switch (type) {
@@ -375,24 +362,15 @@ public class PaxosNode {
 		}
 	}
 	
-	private int getPiece(byte[] buf, MsgPiece msgPiece) {
-		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, msgPiece.offset, 4).position(0);
+	private int getPiece(byte[] buf, int pieceOffset) {
+		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, pieceOffset, 4).position(0);
 		return bb.getInt();
 	}
 	
-	private UUID getID(byte[] buf) {
-		ByteBuffer bbms = (ByteBuffer) ByteBuffer.allocate(8).put(buf, 0, 8).position(0);
-		ByteBuffer bbls = (ByteBuffer) ByteBuffer.allocate(8).put(buf, 8, 8).position(0);
-		long uuidms = bbms.getLong();
-		long uuidls = bbls.getLong();
-		
-		return new UUID(uuidms, uuidls);
-	}
-	
 	private Ballot getBallot(byte[] buf) {
-		int instance = getPiece(buf, MsgPiece.INSTANCE);
-		int proposal = getPiece(buf, MsgPiece.PROPOSAL);
-		int value = getPiece(buf, MsgPiece.VALUE);
+		int instance = getPiece(buf, PaxosConstants.OFFSET_INSTANCE);
+		int proposal = getPiece(buf, PaxosConstants.OFFSET_PROPOSAL);
+		int value = getPiece(buf, PaxosConstants.OFFSET_VALUE);
 		
 		return new Ballot(instance, proposal, value);
 	}

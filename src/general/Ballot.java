@@ -14,7 +14,7 @@ public class Ballot {
 	public boolean equals(Object obj) {
 		if (obj instanceof Ballot) {
 			Ballot bal = (Ballot) obj;
-			return instance == bal.instance && proposal == bal.proposal && value == bal.value;
+			return instance.equals(bal.instance) && proposal.equals(bal.proposal) && value.equals(bal.value);
 		}
 		
 		return false;
@@ -22,9 +22,9 @@ public class Ballot {
 	
 	public int hashCode() {
 		int hash = 13;
-		hash = hash * 17 + instance.hashCode();
-		hash = hash * 23 + proposal.hashCode();
-		hash = hash * 31 + value.hashCode();
+		hash = hash * 17 + instance;
+		hash = hash * 23 + proposal;
+		hash = hash * 31 + value;
 		
 		return hash;
 	}

@@ -5,6 +5,25 @@ import java.util.UUID;
 
 public class PaxosUtil {
 	
+	public static UUID getID(byte[] buf) {
+		ByteBuffer bbms = (ByteBuffer) ByteBuffer.allocate(8).put(buf, PaxosConstants.OFFSET_ID, 8).position(0);
+		ByteBuffer bbls = (ByteBuffer) ByteBuffer.allocate(8).put(buf, PaxosConstants.OFFSET_ID + 8, 8).position(0);
+		long uuidms = bbms.getLong();
+		long uuidls = bbls.getLong();
+		
+		return new UUID(uuidms, uuidls);
+	}
+	
+	public static int getType(byte[] buf) {
+		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, PaxosConstants.OFFSET_TYPE, 4).position(0);
+		return bb.getInt();
+	}
+	
+	public static int getValue(byte[] buf) {
+		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, PaxosConstants.OFFSET_VALUE, 4).position(0);
+		return bb.getInt();
+	}
+	
 	public static byte[] uuidToBytes(UUID uuid) {
 		long uuidms = uuid.getMostSignificantBits();
 		long uuidls = uuid.getLeastSignificantBits();

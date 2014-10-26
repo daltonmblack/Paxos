@@ -1,6 +1,7 @@
 package test;
 
 import general.PaxosConstants;
+import general.PaxosUtil;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -18,7 +19,9 @@ public class PaxosClient {
 	public static void main(String[] args) {
 		InetAddress paxosGroup = null;
 		MulticastSocket ms = null;
+		
 		UUID id = UUID.randomUUID();
+		byte[] idBytes = PaxosUtil.uuidToBytes(id);
 		
 		try {
 			paxosGroup = InetAddress.getByName(PaxosConstants.PAX0S_GROUP_ADDRESS);
@@ -41,19 +44,11 @@ public class PaxosClient {
 			System.exit(-1);
 		}
 		
-		// TODO: fix ID of client and type of message sent
-		byte[] bms = ByteBuffer.allocate(8).putLong(id.getMostSignificantBits()).array();
-		byte[] bls = ByteBuffer.allocate(8).putLong(id.getLeastSignificantBits()).array();
-		
-		byte[] idBytes = new byte[16];
-		for (int i = 0; i < 8; i++) {
-			idBytes[i] = bms[i];
-			idBytes[i+8] = bls[i];
-		}
-		
 		System.out.println("Successfully started PaxosClient. Begin proposing values below");
 		
 		Scanner s = new Scanner(System.in);
+		DatagramPacket dgram;
+		
 		System.out.print("Value: ");
 		while (s.hasNextLine()) {
 			int val;
@@ -65,22 +60,36 @@ public class PaxosClient {
 				continue;
 			}
 			
-			byte[] buf = buildPayload(val, idBytes);
-			DatagramPacket dgram = new DatagramPacket(buf, buf.length, paxosGroup, PaxosConstants.PAXOS_PORT);
+			byte[] buf = buildPayload(idBytes, val);
+			dgram = new DatagramPacket(buf, buf.length, paxosGroup, PaxosConstants.PAXOS_PORT);
 			
-			//boolean requestFinished = false;
+			boolean requestFinished = false;
 			
 			try {
 				ms.send(dgram);
 			} catch (IOException e) {
 				error("main", "failed to send value: " + val);
-				//requestFinished = true;
+				requestFinished = true;
 			}
 			
-//			while (!requestFinished) {
-//				dgram = new DatagramPacket(buf, buf.length);
-//				// Wait for packet directed to us.
-//			}
+			// Wait for confirmation of our request.
+			while (!requestFinished) {
+				dgram = new DatagramPacket(buf, buf.length);
+				
+				try {
+					ms.receive(dgram);
+				} catch (IOException e) {
+					continue;
+				}
+				
+				UUID idPacket = PaxosUtil.getID(buf);
+				int type = PaxosUtil.getType(buf);
+				int value = PaxosUtil.getValue(buf);
+				if (PaxosUtil.idEquals(id, idPacket) && type == PaxosConstants.RESPONSE) {
+					requestFinished = true;
+					System.out.println("Value '" + value + "' was accepted by Paxos");
+				}
+			}
 			
 			System.out.print("Value: ");
 		}
@@ -88,7 +97,7 @@ public class PaxosClient {
 		s.close();
 	}
 	
-	private static byte[] buildPayload(int val, byte[] idBytes) {
+	private static byte[] buildPayload(byte[] idBytes, int val) {
 		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 		
 		for (int i = 0; i < 16; i++) {
