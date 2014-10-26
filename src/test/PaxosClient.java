@@ -84,9 +84,10 @@ public class PaxosClient {
 				
 				UUID idPacket = PaxosUtil.getID(buf);
 				int type = PaxosUtil.getType(buf);
-				int value = PaxosUtil.getValue(buf);
 				if (PaxosUtil.idEquals(id, idPacket) && type == PaxosConstants.RESPONSE) {
 					requestFinished = true;
+					byte[] data = PaxosUtil.getData(buf);
+					int value = ((ByteBuffer) ByteBuffer.allocate(4).put(data, 0, 4).position(0)).getInt();
 					System.out.println("Value '" + value + "' was accepted by Paxos");
 				}
 			}
@@ -105,11 +106,13 @@ public class PaxosClient {
 		}
 		
 		byte[] typeBytes = ByteBuffer.allocate(4).putInt(PaxosConstants.REQUEST).array();
-		byte[] valBytes = ByteBuffer.allocate(4).putInt(val).array();
+		byte[] lengthBytes = ByteBuffer.allocate(4).putInt(4).array();
+		byte[] dataBytes = ByteBuffer.allocate(4).putInt(val).array();
 		
 		for (int i = 0; i < 4; i++) {
 			buf[i+16] = typeBytes[i];
-			buf[i+20] = valBytes[i];
+			buf[i+20] = lengthBytes[i];
+			buf[i+32] = dataBytes[i];
 		}
 		
 		return buf;

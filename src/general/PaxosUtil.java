@@ -19,9 +19,25 @@ public class PaxosUtil {
 		return bb.getInt();
 	}
 	
-	public static int getValue(byte[] buf) {
-		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, PaxosConstants.OFFSET_VALUE, 4).position(0);
+	public static int getLength(byte[] buf) {
+		int type = getType(buf);
+		if (type == 0) return -1;
+		
+		ByteBuffer bb = (ByteBuffer) ByteBuffer.allocate(4).put(buf, PaxosConstants.OFFSET_LENGTH, 4).position(0);
 		return bb.getInt();
+	}
+	
+	public static byte[] getData(byte[] buf) {
+		int length = getLength(buf);
+		if (length < 0) return null;
+		
+		byte[] data = new byte[length];
+		
+		for (int i = 0; i < data.length; i++) {
+			data[i] = buf[i+PaxosConstants.OFFSET_DATA];
+		}
+		
+		return data;
 	}
 	
 	public static byte[] uuidToBytes(UUID uuid) {

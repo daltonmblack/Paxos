@@ -40,14 +40,14 @@ import java.util.concurrent.locks.ReentrantLock;
  *  ----------- ------
  * 
  * Client Request/Confirmation:
- *  ----------- ------ -------
- * | Client ID | Type | Value |
- *  ----------- ------ -------
+ *  ----------- ------ -------- ---------- ---------- ------
+ * | Client ID | Type | Length | XXXXXXXX | XXXXXXXX | Data |
+ *  ----------- ------ -------- ---------- ---------- ------
  * 
  * Propose/Accept/Learn:
- *  ----------- ------ ------- ---------- ----------
- * | Sender ID | Type | Value | Instance | Proposal |
- *  ----------- ------ ------- ---------- ----------
+ *  ----------- ------ -------- ---------- ---------- ------
+ * | Sender ID | Type | Length | Instance | Proposal | Data |
+ *  ----------- ------ -------- ---------- ---------- ------
  *  
  * Sender ID: ID of PaxosNode sending the message (16 bytes)
  * Client ID: ID of the client sending the request or receiving the confirmation (16 bytes)
@@ -58,9 +58,10 @@ import java.util.concurrent.locks.ReentrantLock;
  *   - 3: accept
  *   - 4: learn
  *   - 5: client response
- * Value: value of the proposal (4 bytes)
+ * Length: length of the data (4 bytes)
  * Instance: instance number (4 bytes)
  * Proposal: proposal number (4 bytes)
+ * Data: data requested by the client (Length bytes)
  */
 
 public class PaxosNode {
@@ -98,7 +99,7 @@ public class PaxosNode {
 	private Map<Integer, Ballot> acceptedBallots;
 	
 	// Maps instance number to learned value.
-	private Map<Integer, Integer> learnedValues;
+	private Map<Integer, Byte[]> learnedValues;
 	
 	// Used to determine leader duties and switches.
 	private boolean paxosStarted; // TODO: remove this later?
@@ -186,7 +187,7 @@ public class PaxosNode {
 		
 		acceptedBallots = new HashMap<Integer, Ballot>();
 		
-		learnedValues = new HashMap<Integer, Integer>();
+		learnedValues = new HashMap<Integer, Byte[]>();
 		
 		paxosStarted = false;
 		isLeader = false;
@@ -255,17 +256,19 @@ public class PaxosNode {
 				continue;
 			}
 			
-			UUID idSender = PaxosUtil.getID(buf);
+			UUID idPacket = PaxosUtil.getID(buf);
 			int type = PaxosUtil.getType(buf);
-			int val = PaxosUtil.getValue(buf);
 			Ballot ballot;
 			
 			switch (type) {
 				case PaxosConstants.HEARTBEAT:
-					processHeartbeat(idSender);
+					processHeartbeat(idPacket);
 					break;
 				case PaxosConstants.REQUEST:
-					if (isLeader) processRequest(idSender, val);
+					if (isLeader) {
+						byte[] data = PaxosUtil.getData(buf);
+						processRequest(idPacket, data);
+					}
 					break;
 				case PaxosConstants.PROPOSE:
 					ballot = getBallot(buf);
@@ -273,7 +276,7 @@ public class PaxosNode {
 					break;
 				case PaxosConstants.ACCEPT:
 					ballot = getBallot(buf);
-					if (isLeader) processAccept(idSender, ballot);
+					if (isLeader) processAccept(idPacket, ballot);
 					break;
 				case PaxosConstants.LEARN:
 					ballot = getBallot(buf);
@@ -314,12 +317,12 @@ public class PaxosNode {
 		mtxAliveNodes.unlock();
 	}
 	
-	private void processRequest(UUID idSender, int value) {
-		Ballot ballot = new Ballot(requestAccepts.size() + 1, 1, value);
-		requests.put(ballot, idSender);
+	private void processRequest(UUID idClient, byte[] data) {
+		Ballot ballot = new Ballot(requestAccepts.size() + 1, 1, data);
+		requests.put(ballot, idClient);
 		requestAccepts.put(ballot, new HashSet<UUID>());
 		if (!sendBallot(ballot, PaxosConstants.PROPOSE)) {
-			error("processRequest", "failed to send client: " + idSender + "'s request for value: " + value);
+			error("processRequest", "failed to send client: " + idClient + "'s request for data");
 		}
 	}
 	
@@ -340,22 +343,32 @@ public class PaxosNode {
 	}
 	
 	private void processLearn(Ballot ballot) {
-		learnedValues.put(ballot.instance, ballot.value);
+		int length = ballot.data.length;
+		Byte[] data = new Byte[length];
+		for (int i = 0; i < length; i++) {
+			data[i] = ballot.data[i];
+		}
+			
+		learnedValues.put(ballot.instance, data);
 		if (isLeader) {
 			UUID idClient = requests.get(ballot);
-			//requests.remove(ballot); // TODO: Cannot do this because lists need to keep growing.
+			//requests.remove(ballot); // TODO: Cannot do this because lists need to keep growing. Keep a counter instead so this list does not keep filling.
 			//requestAccepts.remove(ballot); // TODO: see above ^
 			
 			byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 			
 			byte[] idBytes = PaxosUtil.uuidToBytes(idClient);
 			byte[] typeBytes = ByteBuffer.allocate(4).putInt(5).array();
-			byte[] valueBytes = ByteBuffer.allocate(4).putInt(ballot.value).array();
+			byte[] lengthBytes = ByteBuffer.allocate(4).putInt(length).array();
 			
 			for (int i = 0; i < 16; i++) buf[i] = idBytes[i];
 			for (int i = 0; i < 4; i++) {
 				buf[i+16] = typeBytes[i];
-				buf[i+20] = valueBytes[i];
+				buf[i+20] = lengthBytes[i];
+			}
+			
+			for (int i = 0; i < length; i++) {
+				buf[i+32] = data[i];
 			}
 			
 			if (!send(buf)) error("processLearn", "failed to send confirmation to client");
@@ -370,17 +383,18 @@ public class PaxosNode {
 	private Ballot getBallot(byte[] buf) {
 		int instance = getPiece(buf, PaxosConstants.OFFSET_INSTANCE);
 		int proposal = getPiece(buf, PaxosConstants.OFFSET_PROPOSAL);
-		int value = getPiece(buf, PaxosConstants.OFFSET_VALUE);
+		byte[] data = PaxosUtil.getData(buf);
 		
-		return new Ballot(instance, proposal, value);
+		return new Ballot(instance, proposal, data);
 	}
 	
 	private boolean sendBallot(Ballot ballot, int type) {
 		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 		byte[] typeBytes = ByteBuffer.allocate(4).putInt(type).array();
+		byte[] lengthBytes = ByteBuffer.allocate(4).putInt(ballot.data.length).array();
 		byte[] instanceBytes = ByteBuffer.allocate(4).putInt(ballot.instance).array();
 		byte[] proposalBytes = ByteBuffer.allocate(4).putInt(ballot.proposal).array();
-		byte[] valueBytes = ByteBuffer.allocate(4).putInt(ballot.value).array();
+		byte[] dataBytes = ballot.data;
 		
 		for (int i = 0; i < 16; i++) {
 			buf[i] = idBytes[i];
@@ -388,9 +402,13 @@ public class PaxosNode {
 		
 		for (int i = 0; i < 4; i++) {
 			buf[i+16] = typeBytes[i];
-			buf[i+20] = valueBytes[i];
+			buf[i+20] = lengthBytes[i];
 			buf[i+24] = instanceBytes[i];
 			buf[i+28] = proposalBytes[i];
+		}
+		
+		for (int i = 0; i < ballot.data.length; i++) {
+			buf[i+32] = dataBytes[i];
 		}
 		
 		return send(buf);
