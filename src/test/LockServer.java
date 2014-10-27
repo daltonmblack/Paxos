@@ -24,14 +24,15 @@ import java.util.UUID;
  *  ------------ -------------
  *  
  * Lock Response:
- *  ----------- ------ -------------
- * | Client ID | Type | Lock/Unlock |
- *  ----------- ------ -------------
+ *  ----------- ------ -------- ---------- ---------- -----------------
+ * | Client ID | Type | Length | XXXXXXXX | XXXXXXXX | Success/Failure |
+ *  ----------- ------ -------- ---------- ---------- -----------------
  *  
  * Client ID: client the confirmation is being sent to (16 bytes)
  * Type: type of the message (always PaxosConstants.LOCK_RESPONSE) (4 bytes)
+ * Length: length of the data being sent back (4 bytes)
  * Lock Index: index of the lock requested/released (4 bytes)
- * Lock/Unlock: whether to lock or unlock the specified lock; 0 = unlock; 1 = lock (1 byte)
+ * Success/Failure: whether to lock or unlock the specified lock; 0 = unlock; 1 = lock (1 byte)
  */
 
 public class LockServer implements Server {
@@ -47,11 +48,6 @@ public class LockServer implements Server {
 	// Lock server internal pieces.
 	private boolean isLeader;
 	private Map<Integer, Queue<UUID>> locks;
-	
-	private enum MsgType {
-		ACQUIRE,
-		RELEASE;
-	}
 	
 	public LockServer(int numLocks) {
 		paxosGroup = null;
@@ -93,8 +89,14 @@ public class LockServer implements Server {
 		int index = getIndex(data);
 		byte cmd = getCmd(data);
 		
-		if (cmd == 1) acquireLock(idClient, index);
-		else releaseLock(idClient, index);
+		if (index < 0 || index >= locks.keySet().size()) {
+			if (!send(idClient, false)) error("acceptCmd", "failed to send fail to client: " + idClient);
+		} else if (cmd == 0 && (locks.get(index).peek() == null || !locks.get(index).peek().equals(idClient))) {
+			if (!send(idClient, false)) error("acceptCmd", "failed to send fail to client: " + idClient);
+		} else {
+			if (cmd == 1) acquireLock(idClient, index);
+			else releaseLock(idClient, index);
+		}
 	}
 	
 	public void setLeader(boolean isLeader) {
@@ -111,11 +113,12 @@ public class LockServer implements Server {
 		ms.close();
 	}
 	
-	private boolean send(UUID idClient, MsgType type) {
+	private boolean send(UUID idClient, boolean successful) {
 		byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
 		
 		byte[] idBytes = PaxosUtil.uuidToBytes(idClient);
 		byte[] typeBytes = ByteBuffer.allocate(4).putInt(PaxosConstants.LOCK_RESPONSE).array();
+		byte[] lengthBytes = ByteBuffer.allocate(4).putInt(1).array();
 		
 		for (int i = 0; i < 16; i++) {
 			buf[i+PaxosConstants.OFFSET_ID] = idBytes[i];
@@ -123,9 +126,10 @@ public class LockServer implements Server {
 		
 		for (int i = 0; i < 4; i++) {
 			buf[i+PaxosConstants.OFFSET_TYPE] = typeBytes[i];
+			buf[i+PaxosConstants.OFFSET_LENGTH] = lengthBytes[i];
 		}
 		
-		buf[PaxosConstants.OFFSET_ID + PaxosConstants.OFFSET_TYPE] = (byte) ((type == MsgType.RELEASE) ? 0 : 1);
+		buf[PaxosConstants.OFFSET_DATA] = (byte) (successful ? 1 : 0);
 		
 		DatagramPacket dgram = new DatagramPacket(buf, buf.length, paxosGroup, PaxosConstants.PAXOS_PORT);
 		
@@ -141,20 +145,24 @@ public class LockServer implements Server {
 	
 	private void acquireLock(UUID idClient, int index) {
 		Queue<UUID> q = locks.get(index);
-		if (isLeader && q.isEmpty()) {
-			if (!send(idClient, MsgType.ACQUIRE)) error("acquireLock", "failed to send acquire to client: " + idClient);
+		boolean acquired = q.isEmpty() || q.peek().equals(idClient);
+		if (q.isEmpty() || !q.peek().equals(idClient)) q.add(idClient);
+		if (isLeader && acquired) {
+			if (!send(idClient, true)) error("acquireLock", "failed to send acquire to client: " + idClient);
 		}
-		q.add(idClient);
 	}
 	
 	private void releaseLock(UUID idClient, int index) {
 		Queue<UUID> q = locks.get(index);
 		q.remove();
-		if (isLeader && !q.isEmpty()) {
-			UUID idWaiting = q.peek();
-			if (!send(idWaiting, MsgType.ACQUIRE)) error("releaseLock", "failed to send acquire to client: " + idClient);
+		if (isLeader) {
+			if (!send(idClient, true)) error("acquireLock", "failed to send release to client: " + idClient);
+			
+			if (!q.isEmpty()) {
+				UUID idWaiting = q.peek();
+				if (!send(idWaiting, true)) error("releaseLock", "failed to send acquire to client: " + idClient);
+			}
 		}
-		if (!send(idClient, MsgType.RELEASE)) error("acquireLock", "failed to send release to client: " + idClient);
 	}
 	
 	private int getIndex(byte[] data) {

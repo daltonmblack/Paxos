@@ -7,7 +7,7 @@ public class TestBasic {
 		System.out.println("Basic test of Paxos algorithm:");
 		System.out.println();
 		
-		PaxosNode n1 = new PaxosNode();
+		PaxosNode n1 = new PaxosNode(new LockServer(0));
 		if (!n1.init()) {
 			System.out.println("Failed to initiate proposer p1");
 		}

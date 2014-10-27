@@ -2,7 +2,21 @@ Dalton Black
 1128419
 blackd22@uw.edu
 
-How to launch lock server: run ./startLockServer from main project directory.
+How to launch lock server:
+  - ./startLockServer <numLocks> from main project directory
+    - The above command will start a singe instance of a lockServer in the Paxos
+      network with numLocks locks. The above command should be run once for each
+      node desired in the Paxos group. I.e., if the user desires a Paxos group
+      of 6 nodes, he/she must run the startLockServer script in either 6
+      different shells, or push them to the backgroud.
+    - The reason I didn't make the script itself push the processes into the
+      background was that I didn't want to force you (the TA's) to have to go
+      and dig up their PID's if you ever wanted to kill them.xs
+
+How to start lock client:
+  - ./startLockClient from the main project directory allows the user to startup
+    a client program that can make lock requests in the form of 'l/u <num>'.
+
 
 OUTLINE
 
@@ -164,15 +178,15 @@ MESSAGE STRUCTURES (GENERAL)
 
 MESSAGE STRUCTURES (LOCK SERVER)
 
-  Lock Request
+  Lock Request (Data section of Client Request)
    ------------ -------------
   | Lock Index | Lock/Unlock |
    ------------ -------------
 
   Lock Response
-   ----------- ------ -------------
-  | Client ID | Type | Lock/Unlock |
-   ----------- ------ -------------
+   ----------- ------ -------- ---------- ---------- -----------------
+  | Client ID | Type | Length | XXXXXXXX | XXXXXXXX | Success/Failure |
+   ----------- ------ -------- ---------- ---------- -----------------
 
   - Client ID: client the confirmation is being sent to (16 bytes)
   - Type: type of the message (always PaxosConstants.LOCK_RESPONSE) (4 bytes)

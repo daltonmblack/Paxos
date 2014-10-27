@@ -23,12 +23,10 @@ import java.util.UUID;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import test.LockServer;
-
-// TODO: add length field to make string payload possible
 // TODO: should more PaxosNode_s be able to come online after initial minimum?
 // TODO: a learner will be able to play catch up by looking at instance numbers.
 // TODO: keep track of instance number instead of storing all requests in a list.
+// TODO: create a default Server implementation class.
 
 /*
  * Notes:
@@ -49,9 +47,9 @@ import test.LockServer;
  *  ----------- ------ -------- ---------- ---------- ------
  * 
  * Propose/Accept/Learn:
- *  ----------- ------ -------- ---------- ---------- ------
- * | Sender ID | Type | Length | Instance | Proposal | Data |
- *  ----------- ------ -------- ---------- ---------- ------
+ *  ----------- ------ -------- ---------- ---------- ------ -----------
+ * | Sender ID | Type | Length | Instance | Proposal | Data | Client ID |
+ *  ----------- ------ -------- ---------- ---------- ------ -----------
  *  
  * Sender ID: ID of PaxosNode sending the message (16 bytes)
  * Client ID: ID of the client sending the request or receiving the confirmation (16 bytes)
@@ -158,6 +156,7 @@ public class PaxosNode {
 				
 				if (PaxosUtil.idEquals(id, idLargest)) {
 					isLeader = true;
+					server.setLeader(true);
 					System.out.println("I am the new leader!");
 				}
 				
@@ -168,7 +167,7 @@ public class PaxosNode {
 		}
 	}
 	
-	public PaxosNode() {
+	public PaxosNode(Server s) {
 		paxosGroup = null;
 		ms = null;
 		paxosPort = PaxosConstants.PAXOS_PORT;
@@ -199,7 +198,7 @@ public class PaxosNode {
 		isLeader = false;
 		idLeader = null;
 		
-		server = new LockServer(0);
+		server = s; 
 	}
 	
 	public boolean init() {
@@ -296,10 +295,6 @@ public class PaxosNode {
 		}
 		
 		clean();
-		
-		for (Integer i : learnedValues.keySet()) {
-			System.out.println("Instance: " + i + ", value: " + learnedValues.get(i));
-		}
 	}
 	
 	private void processHeartbeat(UUID idSender) {
@@ -316,6 +311,7 @@ public class PaxosNode {
 			UUID idLargest = idLargestAlive();
 			if (PaxosUtil.idEquals(id, idLargest)) {
 				isLeader = true;
+				server.setLeader(true);
 				System.out.println("I am the new leader!");
 			}
 			
@@ -326,7 +322,7 @@ public class PaxosNode {
 	}
 	
 	private void processRequest(UUID idClient, byte[] data) {
-		Ballot ballot = new Ballot(requestAccepts.size() + 1, 1, data);
+		Ballot ballot = new Ballot(requestAccepts.size() + 1, 1, data, idClient);
 		requests.put(ballot, idClient);
 		requestAccepts.put(ballot, new HashSet<UUID>());
 		if (!sendBallot(ballot, PaxosConstants.PROPOSE)) {
@@ -358,29 +354,7 @@ public class PaxosNode {
 		}
 			
 		learnedValues.put(ballot.instance, data);
-		if (isLeader) {
-			UUID idClient = requests.get(ballot);
-			//requests.remove(ballot); // TODO: Cannot do this because lists need to keep growing. Keep a counter instead so this list does not keep filling.
-			//requestAccepts.remove(ballot); // TODO: see above ^
-			
-			byte[] buf = new byte[PaxosConstants.BUFFER_LENGTH];
-			
-			byte[] idBytes = PaxosUtil.uuidToBytes(idClient);
-			byte[] typeBytes = ByteBuffer.allocate(4).putInt(5).array();
-			byte[] lengthBytes = ByteBuffer.allocate(4).putInt(length).array();
-			
-			for (int i = 0; i < 16; i++) buf[i] = idBytes[i];
-			for (int i = 0; i < 4; i++) {
-				buf[i+16] = typeBytes[i];
-				buf[i+20] = lengthBytes[i];
-			}
-			
-			for (int i = 0; i < length; i++) {
-				buf[i+32] = data[i];
-			}
-			
-			if (!send(buf)) error("processLearn", "failed to send confirmation to client");
-		}
+		server.acceptCmd(ballot.idClient, ballot.data);
 	}
 	
 	private int getPiece(byte[] buf, int pieceOffset) {
@@ -393,8 +367,11 @@ public class PaxosNode {
 		int instance = getPiece(buf, PaxosConstants.OFFSET_INSTANCE);
 		int proposal = getPiece(buf, PaxosConstants.OFFSET_PROPOSAL);
 		byte[] data = PaxosUtil.getData(buf);
+		long idClientMs = ((ByteBuffer) ByteBuffer.allocate(8).put(buf, PaxosConstants.OFFSET_DATA + data.length, 8).position(0)).getLong();
+		long idClientLs = ((ByteBuffer) ByteBuffer.allocate(8).put(buf, PaxosConstants.OFFSET_DATA + data.length + 8, 8).position(0)).getLong();
+		UUID idClient = new UUID(idClientMs, idClientLs);
 		
-		return new Ballot(instance, proposal, data);
+		return new Ballot(instance, proposal, data, idClient);
 	}
 	
 	private boolean sendBallot(Ballot ballot, int type) {
@@ -404,6 +381,8 @@ public class PaxosNode {
 		byte[] instanceBytes = ByteBuffer.allocate(4).putInt(ballot.instance).array();
 		byte[] proposalBytes = ByteBuffer.allocate(4).putInt(ballot.proposal).array();
 		byte[] dataBytes = ballot.data;
+		byte[] idClientBytesMs = ByteBuffer.allocate(8).putLong(ballot.idClient.getMostSignificantBits()).array();
+		byte[] idClientBytesLs = ByteBuffer.allocate(8).putLong(ballot.idClient.getLeastSignificantBits()).array();
 		
 		for (int i = 0; i < 16; i++) {
 			buf[i] = idBytes[i];
@@ -418,6 +397,11 @@ public class PaxosNode {
 		
 		for (int i = 0; i < ballot.data.length; i++) {
 			buf[i+32] = dataBytes[i];
+		}
+		
+		for (int i = 0; i < 8; i++) {
+			buf[i+32+ballot.data.length] = idClientBytesMs[i];
+			buf[i+40+ballot.data.length] = idClientBytesLs[i];
 		}
 		
 		return send(buf);
