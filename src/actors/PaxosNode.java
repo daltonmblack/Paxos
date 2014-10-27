@@ -3,6 +3,7 @@ package actors;
 import general.Ballot;
 import general.PaxosConstants;
 import general.PaxosUtil;
+import general.Server;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -22,6 +23,8 @@ import java.util.UUID;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
+import test.LockServer;
+
 // TODO: add length field to make string payload possible
 // TODO: should more PaxosNode_s be able to come online after initial minimum?
 // TODO: a learner will be able to play catch up by looking at instance numbers.
@@ -32,7 +35,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *   - The server with the currently highest ID serves as the leader.
  */
 
-/* Message structures
+/* Message Structures
  * 
  * Heartbeat:
  *  ----------- ------
@@ -105,6 +108,8 @@ public class PaxosNode {
 	private boolean paxosStarted; // TODO: remove this later?
 	private boolean isLeader;
 	private UUID idLeader;
+	
+	private Server server;
 	
 	private class Heartbeat extends TimerTask {
 		
@@ -192,6 +197,8 @@ public class PaxosNode {
 		paxosStarted = false;
 		isLeader = false;
 		idLeader = null;
+		
+		server = new LockServer(0);
 	}
 	
 	public boolean init() {
@@ -236,7 +243,7 @@ public class PaxosNode {
 			}
 		});
 		
-		return true;
+		return server.init();
 	}
 	
 	public void run() {
@@ -380,6 +387,7 @@ public class PaxosNode {
 		return bb.getInt();
 	}
 	
+	
 	private Ballot getBallot(byte[] buf) {
 		int instance = getPiece(buf, PaxosConstants.OFFSET_INSTANCE);
 		int proposal = getPiece(buf, PaxosConstants.OFFSET_PROPOSAL);
@@ -431,6 +439,7 @@ public class PaxosNode {
 		return true;
 	}
 
+	
 	private UUID idLargestAlive() {
 		mtxAliveNodes.lock();
 		
@@ -444,6 +453,7 @@ public class PaxosNode {
 		return idLargest;
 	}
 	
+	
 	private void clean() {
 		timerHeartbeat.cancel();
 		timerKeepalive.cancel();
@@ -455,7 +465,10 @@ public class PaxosNode {
 		}
 		
 		ms.close();
+		
+		server.clean();
 	}
+	
 	
 	private void error(String methodName, String msg) {
 		// Prevents false error messages on exit.

@@ -18,6 +18,7 @@ public class PaxosConstants {
 	public static final int ACCEPT = 3;
 	public static final int LEARN = 4;
 	public static final int RESPONSE = 5;
+	public static final int LOCK_RESPONSE = 6;
 	
 	// Message piece offsets.
 	public static final int OFFSET_ID = 0;

@@ -26,7 +26,7 @@ public class PaxosClient {
 		try {
 			paxosGroup = InetAddress.getByName(PaxosConstants.PAX0S_GROUP_ADDRESS);
 		} catch (UnknownHostException e) {
-			error("init", "failed to create paxos group address");
+			error("main", "failed to create paxos group address");
 			System.exit(-1);
 		}
 		
