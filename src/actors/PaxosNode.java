@@ -28,6 +28,7 @@ import test.LockServer;
 // TODO: add length field to make string payload possible
 // TODO: should more PaxosNode_s be able to come online after initial minimum?
 // TODO: a learner will be able to play catch up by looking at instance numbers.
+// TODO: keep track of instance number instead of storing all requests in a list.
 
 /*
  * Notes:
@@ -42,7 +43,7 @@ import test.LockServer;
  * | Sender ID | Type |
  *  ----------- ------
  * 
- * Client Request/Confirmation:
+ * Client Request/Response:
  *  ----------- ------ -------- ---------- ---------- ------
  * | Client ID | Type | Length | XXXXXXXX | XXXXXXXX | Data |
  *  ----------- ------ -------- ---------- ---------- ------
